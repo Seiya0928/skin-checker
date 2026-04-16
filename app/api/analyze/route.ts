@@ -1,17 +1,58 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Anthropic from '@anthropic-ai/sdk';
-
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+import { createServerClient } from '@supabase/ssr';
+import { createClient } from '@supabase/supabase-js';
+import { cookies } from 'next/headers';
 
 export async function POST(req: NextRequest) {
+  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  const supabaseAdmin = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  );
   try {
-    const { ingredients, skinType, concerns } = await req.json();
+    const { ingredients, skinType, concerns, isTrial } = await req.json();
 
-    if (!ingredients || typeof ingredients !== 'string' || ingredients.trim().length === 0) {
+    if (!ingredients?.trim()) {
       return NextResponse.json({ ok: false, error: '成分が入力されていません' }, { status: 400 });
     }
 
-    const skinContext = skinType ? `\n【肌タイプ】${skinType}` : '';
+    // --- クレジット確認 ---
+    let userId: string | null = null;
+
+    if (!isTrial) {
+      const cookieStore = await cookies();
+      const supabase = createServerClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+        {
+          cookies: {
+            getAll: () => cookieStore.getAll(),
+            setAll: (toSet) => {
+              toSet.forEach(({ name, value, options }) => cookieStore.set(name, value, options));
+            },
+          },
+        }
+      );
+
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return NextResponse.json({ ok: false, error: 'ログインが必要です' }, { status: 401 });
+
+      userId = user.id;
+
+      const { data: creditRow } = await supabaseAdmin
+        .from('user_credits')
+        .select('credits')
+        .eq('user_id', userId)
+        .single();
+
+      if (!creditRow || creditRow.credits < 1) {
+        return NextResponse.json({ ok: false, error: 'クレジットが不足しています', code: 'no_credits' }, { status: 402 });
+      }
+    }
+
+    // --- Claude API 呼び出し ---
+    const skinContext    = skinType ? `\n【肌タイプ】${skinType}` : '';
     const concernContext = concerns?.length > 0 ? `\n【肌の悩み】${concerns.join('、')}` : '';
 
     const prompt = `あなたは化粧品成分の専門家（コスメトロジスト）です。以下の成分リストを解析してください。${skinContext}${concernContext}
@@ -44,28 +85,39 @@ ${ingredients}
 - safe（5）: セラミド、ヒアルロン酸、グリセリン、スクワランなど安全性が高く広く使われる成分
 - safe（4）: ナイアシンアミド、パンテノール、アラントインなど有効性・安全性が確認済み
 - caution（3）: アルコール類、一部の防腐剤（フェノキシエタノール等）、香料など人によって刺激になりうる成分
-- warning（2以下）: パラベン類（一部）、フォルムアルデヒド放出防腐剤、ラウリル硫酸塩、高濃度の酸類、トレチノイン、ハイドロキノンなど
+- warning（2以下）: パラベン類（一部）、フォルムアルデヒド放出防腐剤、ラウリル硫酸塩、高濃度の酸類など
 - unknown: 情報が少ない成分
 
 【注意】
 - 成分リストは配合量の多い順（上位が多い）なので、上位の成分ほど重要
-- 敏感肌向けでない製品でも安全スコアは下げすぎない
 - 日本語・英語・INCI名など様々な表記があるので正確に識別すること
 - 全成分が多い場合でも全て解析すること`;
 
-    const response = await client.messages.create({
+    const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 4000,
       messages: [{ role: 'user', content: prompt }],
     });
 
     const text = (response.content[0] as { type: string; text: string }).text;
-
-    // JSONを抽出
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error('JSONの解析に失敗しました');
-
     const data = JSON.parse(jsonMatch[0]);
+
+    // --- クレジット消費（解析成功後に引く）---
+    if (userId) {
+      const { data: creditRow } = await supabaseAdmin
+        .from('user_credits')
+        .select('credits')
+        .eq('user_id', userId)
+        .single();
+
+      await supabaseAdmin
+        .from('user_credits')
+        .update({ credits: (creditRow?.credits ?? 1) - 1, updated_at: new Date().toISOString() })
+        .eq('user_id', userId);
+    }
+
     return NextResponse.json({ ok: true, data });
   } catch (e) {
     console.error(e);
