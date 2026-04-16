@@ -91,7 +91,7 @@ export default function HomePage() {
       email,
       options: { emailRedirectTo: `${window.location.origin}/auth/callback` },
     });
-    if (error) { setAuthError('送信に失敗しました'); return; }
+    if (error) { setAuthError(error.message); return; }
     setEmailSent(true);
   };
 
