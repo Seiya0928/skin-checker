@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Textarea } from '@/components/ui/textarea';
 import { type AnalysisResult, type SafetyLevel, SAFETY_LABELS } from '@/types';
@@ -30,7 +30,7 @@ function ScoreDots({ score }: { score: number }) {
 }
 
 export default function HomePage() {
-  const supabase = createClient();
+  const supabaseRef = useRef<ReturnType<typeof createClient> | null>(null);
 
   const [user, setUser]           = useState<User | null>(null);
   const [credits, setCredits]     = useState<number | null>(null);
@@ -55,6 +55,9 @@ export default function HomePage() {
   const [purchasing, setPurchasing]   = useState(false);
 
   useEffect(() => {
+    supabaseRef.current = createClient();
+    const supabase = supabaseRef.current;
+
     setTrialUsed(!!localStorage.getItem(TRIAL_KEY));
 
     supabase.auth.getUser().then(({ data: { user } }) => {
@@ -81,13 +84,17 @@ export default function HomePage() {
   }, [user]);
 
   const fetchCredits = async (uid: string) => {
-    const { data } = await supabase.from('user_credits').select('credits').eq('user_id', uid).single();
+    const sb = supabaseRef.current;
+    if (!sb) return;
+    const { data } = await sb.from('user_credits').select('credits').eq('user_id', uid).single();
     setCredits(data?.credits ?? 0);
   };
 
   const handleSendMagicLink = async () => {
+    const sb = supabaseRef.current;
+    if (!sb) return;
     setAuthError('');
-    const { error } = await supabase.auth.signInWithOtp({
+    const { error } = await sb.auth.signInWithOtp({
       email,
       options: { emailRedirectTo: `${window.location.origin}/auth/callback` },
     });
@@ -96,7 +103,9 @@ export default function HomePage() {
   };
 
   const handleLogout = async () => {
-    await supabase.auth.signOut();
+    const sb = supabaseRef.current;
+    if (!sb) return;
+    await sb.auth.signOut();
     setUser(null);
     setCredits(null);
   };
